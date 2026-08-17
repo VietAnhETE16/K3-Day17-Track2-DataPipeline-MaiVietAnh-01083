@@ -5,6 +5,8 @@ __pycache__/
 # kho dữ liệu và seed đều được sinh lại bằng `make setup`
 warehouse.duckdb
 warehouse.duckdb.wal
+*.duckdb
+*.duckdb.wal
 seed/*.jsonl
 data/
 verify_result.json
