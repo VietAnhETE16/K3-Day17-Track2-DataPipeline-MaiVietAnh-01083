@@ -1,6 +1,6 @@
 # Báo cáo LAB 17 — Data Pipeline Engineering
 
-**Họ tên:** Mai Việt Anh  **Lớp:** AICB-P2T2  **Ngày:** 17/08/2026
+**Họ tên:** Mai Việt Anh  **Lớp:** 2A  **Ngày:** 17/08/2026
 
 ---
 
