@@ -63,27 +63,34 @@ def main() -> int:
     n_src = len(list(SRC.glob("*.parquet")))
     print(f"  nguồn : {SRC}  ({n_src:,} file)")
 
-    # TODO(nhiệm vụ 4): hiện thực khung COPY ... TO ... ở phần docstring.
-    #
-    #   con.execute(f"""
-    #       copy (
-    #           select * from read_parquet('{SRC}/*.parquet')
-    #           order by ...
-    #       ) to '{DST}' (
-    #           format parquet,
-    #           partition_by (...),
-    #           overwrite_or_ignore,
-    #           row_group_size ...
-    #       )
-    #   """)
-    #
-    # Sau đó kiểm tra không mất hàng nào:
-    #
-    #   assert <số row dataset cũ> == <số row dataset mới>
+    src_glob = (SRC / "*.parquet").as_posix()
+    dst_path = DST.as_posix()
+    dst_glob = (DST / "*/*.parquet").as_posix()
 
-    print("\n  tools/compact.py chưa được hiện thực — đây là nhiệm vụ 4.")
-    print("  Mở file này, đọc phần KHUNG THỰC HIỆN ở đầu file và điền vào TODO.")
-    print("  Hướng dẫn từng bước: GUIDE.md mục 4.\n")
+    import shutil
+    shutil.rmtree(DST, ignore_errors=True)
+
+    print("  đang compact dataset và partition theo event_date…")
+    con.execute(f"""
+        copy (
+            select * from read_parquet('{src_glob}')
+            order by customer_name, event_time
+        ) to '{dst_path}' (
+            format parquet,
+            partition_by (event_date),
+            overwrite_or_ignore,
+            row_group_size 2048
+        )
+    """)
+
+    n_dst = len(list(DST.glob("*/*.parquet")))
+    print(f"  đích  : {DST}  ({n_dst:,} file)")
+
+    src_rows = con.execute(f"select count(*) from read_parquet('{src_glob}')").fetchone()[0]
+    dst_rows = con.execute(f"select count(*) from read_parquet('{dst_glob}')").fetchone()[0]
+    print(f"  kiểm tra số hàng: nguồn={src_rows:,} -> đích={dst_rows:,}")
+    assert src_rows == dst_rows, f"Số hàng không khớp: {src_rows} != {dst_rows}"
+    print("  compaction hoàn tất thành công.\n")
     return 0
 
 
