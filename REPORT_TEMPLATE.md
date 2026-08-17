@@ -122,3 +122,26 @@ Câu hỏi thiết kế: nên chặn ở tầng Bronze hay Silver? Vì sao **kh�
 | 1 | Kiểm tra tính **idempotency** của toàn bộ các incremental models (định nghĩa grain thực thể, khai báo `unique_key`, lựa chọn chiến lược `merge`/`delete+insert`) và các tham số điều phối scheduler (`catchup`, `max_active_runs`). |
 | 2 | Đo đạc **phân bố độ trễ nạp dữ liệu** (P95, P99 latency giữa `event_time` và `_ingested_at`) để thiết lập lookback window phù hợp cho dữ liệu đến muộn, kết hợp với cơ chế ghi đè idempotent tránh trùng lặp. |
 | 3 | Kiểm tra hệ thống **Data Contract** tại tầng Silver, phân loại chính xác giữa Schema Evolution và Bad Data, thiết lập cơ chế Dead Letter Queue (**Quarantine**) để cách ly lỗi mà không làm gián đoạn pipeline, cùng bộ kiểm thử dữ liệu toàn diện (`dbt test`). |
+
+---
+
+## 6 · Bảng tự chấm nhanh (Self-Assessment)
+
+| Hạng mục kiểm tra | Của tôi | Kỳ vọng | Đạt (✓/✗) |
+|---|---|---|:---:|
+| `gold_training_set` — số hàng | **12.480** | 12.480 | ✓ |
+| `gold_training_set` — ổn định 3 lượt | **8dd7c98653** | Giống nhau 3 lượt | ✓ |
+| `gold_feature_daily` — số hàng | **9.100** | 9.100 | ✓ |
+| `gold_feature_daily` — ổn định 3 lượt | **3db448685c** | Giống nhau 3 lượt | ✓ |
+| `gold_doc_chunks` — số hàng | **31.200** | 31.200 | ✓ |
+| `gold_doc_chunks` — ổn định 3 lượt | **92d8e50131** | Giống nhau 3 lượt | ✓ |
+| `quarantine_tickets` — số hàng | **312** | 312 | ✓ |
+| `quarantine_tickets` — ổn định 3 lượt | **ebb89036fb** | Giống nhau 3 lượt | ✓ |
+| `silver_tickets` — số ticket | **12.480** | 12.480 | ✓ |
+| `silver_tickets.priority` | **Sạch ∈ 1..4, không NULL** | 1..4, không NULL | ✓ |
+| `dbt test` | **11/11 pass** | pass, > 9 test | ✓ |
+| P99 độ trễ đo được | **2.73 ngày** (Lookback 3 ngày) | (ghi số) | ✓ |
+| Bài mở rộng A (Dashboard compaction) | **5.000.000 → 9.324 (536.3×)** | giảm ≥ 10× | ✓ |
+| Bài mở rộng B (Crash recovery) | **20.000 / 20.000 (C == A)** | Đạt | ✓ |
+| **Tổng verify** | **4 / 4 tiêu chí đạt** | 4 / 4 tiêu chí | **✓ (110/100)** |
+
