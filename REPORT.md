@@ -63,9 +63,9 @@ Tổng kết: **4 / 4 tiêu chí đạt** (100% tiêu chí chính và mở rộn
 | | |
 |---|---|
 | **Triệu chứng** | Bảng `gold_training_set` tăng đột biến từ 12.480 lên 38.750 hàng sau mỗi lượt chạy (thừa 26.270 hàng), mỗi ticket bị lặp nhiều lần và checksum qua 3 lượt chạy hoàn toàn khác nhau. |
-| **Nguyên nhân** | Model `gold_training_set` được cấu hình `materialized = 'incremental'` nhưng không khai báo `unique_key` và `incremental_strategy`, khiến dbt mặc định sinh ra câu lệnh `INSERT` thuần (append-only). Do nguồn CDC có các bản ghi cập nhật `op = 'u'` ở nhiều ngày khác nhau và scheduler/user chạy lại các partition ngày, dbt chèn thêm hàng mới thay vì ghi đè theo khoá thực thể `ticket_id`. |
-| **Cách khắc phục** | - Trong `dbt/models/gold/gold_training_set.sql`: Khai báo `unique_key = 'ticket_id'` và `incremental_strategy = 'merge'`.<br>- Trong `dags/ai_training_pipeline.py`: Đặt `catchup=False` và `max_active_runs=1` để tránh Airflow tự động chạy bù song song nhiều ngày gây xung đột ghi. |
-| **Bằng chứng** | trước: 38.750 hàng (12.480 ticket bị lặp) · sau: 12.480 hàng (1 hàng / 1 ticket) · checksum 3 lượt: `8dd7c98653` / `8dd7c98653` / `8dd7c98653` (ổn định tuyệt đối). |
+| **Nguyên nhân** | Source CDC chứa bản ghi cập nhật (`op = 'u'`), nhưng incremental model không khai báo `unique_key` nên dbt mặc định generate câu lệnh `INSERT` thuần (append-only); việc chạy lại các partition ngày sẽ liên tục chèn thêm dòng mới thay vì ghi đè theo thực thể `ticket_id`, phá vỡ tính idempotent của đường ống. |
+| **Cách khắc phục** | - `dbt/models/gold/gold_training_set.sql`: Khai báo `unique_key = 'ticket_id'` và `incremental_strategy = 'merge'` để thực hiện upsert.<br>- `dags/ai_training_pipeline.py`: Đặt `catchup=False` và `max_active_runs=1` để tránh Airflow tự động trigger đồng thời nhiều DAG run gây xung đột ghi. |
+| **Bằng chứng** | trước: 38.750 hàng (12.480 ticket bị lặp, checksum 3 lượt không khớp) · sau: 12.480 hàng (1 hàng / 1 ticket không lặp) · checksum 3 lượt: `8dd7c98653` / `8dd7c98653` / `8dd7c98653` (ổn định tuyệt đối). |
 
 ---
 
@@ -73,12 +73,12 @@ Tổng kết: **4 / 4 tiêu chí đạt** (100% tiêu chí chính và mở rộn
 
 | | |
 |---|---|
-| **Triệu chứng** | `gold_feature_daily` bị thiếu 455 hàng (chỉ đạt 8.645 / 9.100 hàng kỳ vọng). Các cặp `(event_date, customer_id)` bị thiếu tập trung ở các ngày trong quá khứ. |
+| **Triệu chứng** | Bảng `gold_feature_daily` bị thiếu 455 hàng (chỉ đạt 8.645 / 9.100 hàng kỳ vọng); các cặp `(event_date, customer_id)` bị thiếu tập trung ở các ngày trong quá khứ. |
 | **P99 độ trễ đo được** | **2.73 ngày** (P50 = 0.13 ngày, P95 = 1.81 ngày, P99 = 2.73 ngày, Max = 2.94 ngày; 5.05% sự kiện đến trễ hơn 1 ngày). |
 | **Lookback đã chọn** | **3 ngày** — vì P99 độ trễ là 2.73 ngày và giá trị trễ tối đa là 2.94 ngày (< 3 ngày), do đó cửa sổ lùi 3 ngày đảm bảo thu thập đầy đủ 100% dữ liệu đến trễ mà vẫn tối ưu tài nguyên tính toán. |
-| **Nguyên nhân** | Dữ liệu sự kiện có độ trễ lớn từ nguồn (late-arriving data). Điều kiện incremental cũ `where event_date > (select max(event_date) from {{ this }})` chỉ xử lý những ngày lớn hơn ngày lớn nhất đã có trong bảng đích, do đó bỏ sót hoàn toàn các sự kiện thuộc ngày cũ nhưng đến kho muộn hơn 1–3 ngày. |
-| **Cách khắc phục** | - Trong `dbt/models/gold/gold_feature_daily.sql`: Nới rộng điều kiện incremental thành `where event_date >= (select max(event_date) from {{ this }}) - interval 3 day`.<br>- Khai báo `unique_key = ['event_date', 'customer_id']` và `incremental_strategy = 'merge'` để việc tính toán lại các ngày trong cửa sổ lookback sẽ thực hiện ghi đè (upsert) thay vì cộng dồn số lượng. |
-| **Bằng chứng** | trước: 8.645 hàng · sau: 9.100 hàng (đủ 14 ngày × 650 customer) · checksum 3 lượt: `3db448685c` / `3db448685c` / `3db448685c` (ổn định). |
+| **Nguyên nhân** | Nguồn phát sinh dữ liệu đến muộn (late-arriving data lên tới ~3 ngày), trong khi điều kiện incremental cũ `where event_date > (select max(event_date) from {{ this }})` chỉ lọc các ngày lớn hơn ngày lớn nhất đã nạp, dẫn đến bỏ sót hoàn toàn các sự kiện của ngày cũ đến kho sau khi ngày đó đã được dbt xử lý ở chu kỳ trước. |
+| **Cách khắc phục** | - `dbt/models/gold/gold_feature_daily.sql`: Nới rộng điều kiện incremental thành `where event_date >= (select max(event_date) from {{ this }}) - interval 3 day`.<br>- Khai báo `unique_key = ['event_date', 'customer_id']` và `incremental_strategy = 'merge'` để các cặp ngày-khách hàng tính lại trong cửa sổ lookback sẽ thực hiện ghi đè (upsert) thay vì bị cộng dồn số lượng. |
+| **Bằng chứng** | trước: 8.645 hàng · sau: 9.100 hàng (đủ 14 ngày × 650 customer) · checksum 3 lượt: `3db448685c` / `3db448685c` / `3db448685c` (ổn định tuyệt đối). |
 
 Vì sao chọn P99 làm căn cứ thay vì `max`? Chi phí của mỗi lựa chọn là gì?
 
@@ -90,11 +90,11 @@ Vì sao chọn P99 làm căn cứ thay vì `max`? Chi phí của mỗi lựa ch�
 
 | | |
 |---|---|
-| **Triệu chứng** | Cột `silver_tickets.priority` có 6.606 hàng sai quy chuẩn (chứa nhiều giá trị NULL và các số ngoài khoảng như 0, 5, -1); bảng `quarantine_tickets` bị rỗng (0 / 312 hàng). |
-| **Nguyên nhân** | Team backend thay đổi schema từ ngày 2026-08-10 (chuyển cách ghi priority từ số sang nhãn chuỗi 'urgent', 'high', 'medium', 'low'), đồng thời nguồn CDC phát sinh các bản ghi lỗi ('P1', 'unknown', '0', '5', '-1', '', NULL). Hàm `try_cast(priority_raw as integer)` ban đầu chuyển nhãn chuỗi thành NULL (vứt bỏ dữ liệu hợp lệ) nhưng lại chấp nhận các số 0, 5, -1; đồng thời bảng quarantine bị gán cứng `where false`. |
-| **Ba nhóm giá trị `priority` và cách xử lý từng nhóm** | 1. **Số hợp lệ** (`1`, `2`, `3`, `4`): Đúng contract -> Giữ nguyên.<br>2. **Nhãn chuỗi** (`urgent`, `high`, `medium`, `low`): Schema evolution từ backend -> Map về số tương ứng (urgent=1, high=2, medium=3, low=4).<br>3. **Giá trị lỗi** (`P1`, `unknown`, `0`, `5`, `-1`, `''`, `NULL`): Dữ liệu lỗi -> Trả về `NULL` và đưa vào bảng `quarantine_tickets`. |
+| **Triệu chứng** | Cột `silver_tickets.priority` có 6.606 hàng sai quy chuẩn (chứa nhiều giá trị NULL và các số ngoài khoảng 1..4 như 0, 5, -1); bảng `quarantine_tickets` bị rỗng (0 / 312 hàng). |
+| **Nguyên nhân** | Nguồn backend thay đổi định dạng biểu diễn priority từ số sang nhãn chữ ('urgent'..'low') kèm một số bản ghi CDC bị lỗi rác ('P1', 'unknown', 0, 5, -1), trong khi câu lệnh ép kiểu `try_cast(priority_raw as integer)` làm biến nhãn chữ thành NULL nhưng lại cho lọt số ngoài quy chuẩn 1..4, đồng thời bảng quarantine bị gán cứng `where false`. |
+| **Ba nhóm giá trị `priority` và cách xử lý từng nhóm** | 1. **Số hợp lệ** (`1`, `2`, `3`, `4`): Đúng contract ban đầu -> Giữ nguyên.<br>2. **Nhãn chuỗi** (`urgent`, `high`, `medium`, `low`): Schema evolution từ backend -> Ánh xạ về số tương ứng (urgent=1, high=2, medium=3, low=4).<br>3. **Giá trị lỗi** (`P1`, `unknown`, `0`, `5`, `-1`, `''`, `NULL`): Dữ liệu rác/hỏng -> Trả về `NULL` và đưa vào bảng `quarantine_tickets`. |
 | **Cách khắc phục** | - `dbt/macros/normalize_priority.sql`: Dùng khối `CASE` phân loại và chuẩn hóa 3 nhóm giá trị, trả về `NULL` cho nhóm 3; bổ sung `priority_reject_reason`.<br>- `dbt/models/silver/silver_tickets.sql`: Lọc bỏ bản ghi lỗi (`where priority_clean is not null`) **trước khi** thực hiện `row_number()`, giúp ticket có bản ghi mới nhất bị lỗi vẫn giữ được trạng thái hợp lệ trước đó (đủ 12.480 ticket).<br>- `dbt/models/silver/quarantine_tickets.sql`: Đổi điều kiện thành `where {{ normalize_priority('priority_raw') }} is null`.<br>- `dbt/models/silver/schema.yml`: Bật `contract: enforced: true` và thêm tests `not_null`, `accepted_values: [1, 2, 3, 4]`. |
-| **Bằng chứng** | `quarantine_tickets` = 312 hàng (100% khớp kỳ vọng) · `silver_tickets` đủ 12.480 ticket · `dbt test` = 11/11 pass (thêm 2 tests mới). |
+| **Bằng chứng** | `quarantine_tickets` = 312 hàng (100% khớp kỳ vọng, không vượt 1.000 hàng) · `silver_tickets` đủ 12.480 ticket · `dbt test` = 11/11 pass (thêm 2 tests mới). |
 
 Câu hỏi thiết kế: nên chặn ở tầng Bronze hay Silver? Vì sao **không** để pipeline dừng khi gặp bản ghi lỗi?
 
@@ -109,8 +109,8 @@ Câu hỏi thiết kế: nên chặn ở tầng Bronze hay Silver? Vì sao **kh�
 | | |
 |---|---|
 | **Bài đã làm** | **Cả hai bài: Bài A (+5 điểm) và Bài B (+5 điểm)** |
-| **Nguyên nhân** | - **Bài A:** Dataset `data/gold_events/` gồm 5.000 file Parquet nhỏ rời rạc (small-file problem), không partition theo ngày và không cluster theo khách hàng; câu truy vấn sử dụng predicate non-sargable `strftime(event_time, '%Y-%m-%d') = '2026-08-09'` buộc DuckDB phải quét toàn bộ 5.000 file (~5.000.000 rows scanned).<br>- **Bài B:** Thứ tự cũ trong `consume()` gọi `consumer.commit()` trước khi `write_batch()` (at-most-once semantics), dẫn đến mất dữ liệu khi tiến trình bị kill ở giữa batch. Nếu đảo lại mà dùng `INSERT` thuần thì khi restart sẽ làm nhân bản dữ liệu (at-least-once). |
-| **Cách khắc phục** | - **Bài A:** Triển khai `tools/compact.py` gom 5.000 file nhỏ thành 14 file partition theo `event_date` tại `data/gold_events_v2/`, sắp xếp `ORDER BY customer_name, event_time` với `ROW_GROUP_SIZE 2048`. Cập nhật `queries/dashboard.sql` đọc với `hive_partitioning = 1` và filter sargable `event_date = '2026-08-09'`.<br>- **Bài B:** Khai báo `event_id varchar primary key` trong DDL bảng `bronze_events_stream`, cập nhật `write_batch` sử dụng `INSERT INTO ... ON CONFLICT (event_id) DO UPDATE SET ...`, và trong `consume()` thực hiện `write_batch()` trước khi `consumer.commit()` (kết hợp at-least-once transport với idempotent upsert). |
+| **Nguyên nhân** | - **Bài A:** Dataset gồm 5.000 file Parquet nhỏ không được partition theo ngày và không cluster theo khách hàng (small-file problem), kết hợp với điều kiện lọc non-sargable `strftime(event_time, '%Y-%m-%d') = '2026-08-09'` làm vô hiệu hóa khả năng pruning metadata min/max của Parquet Reader, buộc DuckDB phải quét toàn bộ 5.000 file (~5.000.000 rows scanned).<br>- **Bài B:** Thứ tự xử lý cũ trong `consume()` gọi `consumer.commit()` trước khi `write_batch()` dẫn đến ngữ nghĩa `at-most-once` (crash xảy ra thì offset đã ghi nhận nhưng DB chưa có dữ liệu); nếu đảo lại ghi trước commit sau mà dùng `INSERT` thuần (`at-least-once`) thì các bản ghi trong batch bị crash sẽ bị chèn trùng lặp khi consumer nạp lại từ offset cũ. |
+| **Cách khắc phục** | - **Bài A:** Triển khai `tools/compact.py` gom 5.000 file nhỏ thành 14 file Hive Partition theo `event_date` tại `data/gold_events_v2/`, sắp xếp `ORDER BY customer_name, event_time` với `ROW_GROUP_SIZE 2048`. Cập nhật `queries/dashboard.sql` đọc với `hive_partitioning = 1` và filter sargable `event_date = '2026-08-09'`.<br>- **Bài B:** Khai báo `event_id varchar primary key` trong DDL bảng `bronze_events_stream`, cập nhật `write_batch` sử dụng `INSERT INTO ... ON CONFLICT (event_id) DO UPDATE SET ...` (idempotent upsert), và trong `consume()` thực hiện `write_batch()` trước khi `consumer.commit()` (kết hợp at-least-once transport với idempotent write = effectively-once processing). |
 | **Bằng chứng** | - **Bài A:** `rows scanned` giảm từ 5.000.000 xuống 9.324 (giảm **536.3×**, mục tiêu ≥ 10×) · Số file giảm từ 5.000 xuống 14 file · `result hash` giữ nguyên `4379e4c5d9f3` · Thời gian query giảm từ ~99.000 ms xuống 13.2 ms.<br>- **Bài B:** `make crash-test` đạt tuyệt đối: Không mất bản ghi (✓), Không trùng bản ghi (✓), C == A = 20.000 hàng / 20.000 event_id (✓) -> **BÀI MỞ RỘNG B: ĐẠT ✓**. |
 
 ---
@@ -144,4 +144,3 @@ Câu hỏi thiết kế: nên chặn ở tầng Bronze hay Silver? Vì sao **kh�
 | Bài mở rộng A (Dashboard compaction) | **5.000.000 → 9.324 (536.3×)** | giảm ≥ 10× | ✓ |
 | Bài mở rộng B (Crash recovery) | **20.000 / 20.000 (C == A)** | Đạt | ✓ |
 | **Tổng verify** | **4 / 4 tiêu chí đạt** | 4 / 4 tiêu chí | **✓ (110/100)** |
-
